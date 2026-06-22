@@ -156,6 +156,53 @@ export class SelectQueryBuilder<O = Record<string, unknown>> {
     return this.join('Cross', source)
   }
 
+  // ---- ClickHouse dialect sugar --------------------------------------------
+
+  /** `FROM t FINAL` — merge parts on read (ReplacingMergeTree, etc.). */
+  final(): SelectQueryBuilder<O> {
+    return this.derive({ final: true })
+  }
+
+  /** `SAMPLE rate` — approximate query over a fraction (or absolute count) of rows. */
+  sample(rate: number): SelectQueryBuilder<O> {
+    return this.derive({ sample: rate })
+  }
+
+  /**
+   * `PREWHERE` — ClickHouse reads these columns first and filters before the
+   * rest of the row is read. Same argument shapes as {@link where}; multiple
+   * calls are AND-combined.
+   */
+  prewhere(lhs: ColumnInput): SelectQueryBuilder<O>
+  prewhere(lhs: ColumnInput, op: string, rhs: unknown): SelectQueryBuilder<O>
+  prewhere(...args: [ColumnInput] | [ColumnInput, string, unknown]): SelectQueryBuilder<O> {
+    return this.derive({ prewhere: combine(this.node.prewhere, this.predicate(args), 'And') })
+  }
+
+  /** Append a trailing `SETTINGS k = v, …` clause (merges across calls). */
+  settings(settings: Record<string, string | number | boolean>): SelectQueryBuilder<O> {
+    return this.derive({ settings: { ...this.node.settings, ...settings } })
+  }
+
+  /**
+   * `FORMAT x` — the SQL-level output format (changes how ClickHouse serializes
+   * the result). This is distinct from `.execute({ format })`, which picks the
+   * view over the bytes (`Row[]` / Arrow `Table` / raw). Use this only when you
+   * read the raw result yourself.
+   */
+  format(name: string): SelectQueryBuilder<O> {
+    return this.derive({ format: name })
+  }
+
+  /**
+   * `LIMIT n BY (cols)` — keep the first n rows per distinct value of the
+   * columns. Independent of (and combinable with) the trailing `LIMIT`.
+   */
+  limitBy(count: number, columns: ColumnInput | ReadonlyArray<ColumnInput>): SelectQueryBuilder<O> {
+    const cols = (Array.isArray(columns) ? columns : [columns]).map(toExpr)
+    return this.derive({ limitBy: { count, columns: cols } })
+  }
+
   // ---- set operations -------------------------------------------------------
 
   private setOp(operator: SetOperator, other: SelectQueryBuilder<O>): SelectQueryBuilder<O> {
