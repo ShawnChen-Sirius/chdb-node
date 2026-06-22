@@ -68,3 +68,18 @@ export type * from './compiler/nodes'
 // Type-system: CH type-string-literal → TS type, row inference.
 export type { CHTypeOf } from './types/ch-types'
 export type { AnyDatabase, ColumnSchema, ColumnType, DatabaseSchema, InferRow, RowOf } from './types/infer'
+
+// Codegen — runtime introspection + the gen-types CLI entry points.
+export {
+  describeSource,
+  introspectTable,
+  introspectDatabase,
+} from './codegen/introspect'
+export type {
+  IntrospectedColumn,
+  IntrospectedDatabase,
+  IntrospectSource,
+  IntrospectContext,
+} from './codegen/introspect'
+export { emitDatabase } from './codegen/emit'
+export type { EmitOptions } from './codegen/emit'
