@@ -238,13 +238,32 @@ describe('connect — metadata discovery SQL (catalog reads, output column alias
   })
 })
 
-describe('connect — config fields with no table-function slot are rejected, not dropped', () => {
-  it('throws when a recognized-but-unwired field is set', () => {
-    expect(() => buildSource({ url: 's3://b/x', region: 'us-east-1' })).toThrow(/"region" is recognized/)
-    expect(() => buildSource({ url: 'https://e.com/d', headers: { a: 'b' } })).toThrow(/"headers" is recognized/)
-    expect(() => buildSource({ url: 'clickhouse://h:9000/db', clickhouseSettings: { max_threads: 4 } })).toThrow(
-      /"clickhouseSettings" is recognized/,
+describe('connect — config field arbitration (mirrors Layer 2)', () => {
+  it('forwards clickhouseSettings to the chDB engine as a SETTINGS clause', () => {
+    const plan = buildSource({ url: 'clickhouse://u:p@h:9000' })
+    expect(compileDatabases(plan, { max_threads: 4 }).sql).toMatch(/ SETTINGS max_threads = 4$/)
+    expect(compileTables(plan, 'prod', { max_threads: 4 }).sql).toMatch(/ SETTINGS max_threads = 4$/)
+    expect(compileDescribe(buildSource({ url: 'file:///d/x.csv' }), undefined, { max_memory_usage: 1000 }).sql).toBe(
+      'DESCRIBE TABLE file({p0:String}) SETTINGS max_memory_usage = 1000',
     )
+    const snap = compileQuery(
+      buildSnapshotNode(buildSource({ url: 'postgres://u:p@h:5432/app' }), 'users', 'dst', { max_threads: 2 }),
+    )
+    expect(snap.sql).toMatch(/ SETTINGS max_threads = 2$/)
+  })
+
+  it('accepts remote-only fields without error and never emits them in SQL', () => {
+    // region/sessionToken/headers/catalogConfig have no table-function slot and
+    // do not change what the local engine executes, so they are ignored.
+    const c = table({
+      url: 's3://b/x',
+      region: 'us-east-1',
+      sessionToken: 'tok',
+      headers: { Authorization: 'secret' },
+      catalogConfig: { uri: 'https://catalog' },
+    })
+    expect(c).toEqual({ sql: 's3({p0:String})', parameters: { p0: 's3://b/x' } })
+    expect(JSON.stringify(c)).not.toMatch(/us-east-1|tok|secret|catalog/)
   })
 })
 

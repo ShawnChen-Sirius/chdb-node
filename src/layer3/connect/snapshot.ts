@@ -15,11 +15,13 @@ export function buildSnapshotNode(
   plan: SourcePlan,
   table: string,
   destination: string,
+  settings?: Readonly<Record<string, string | number | boolean>>,
 ): InsertSelectNode {
   const select: SelectQueryNode = {
     kind: 'SelectQuery',
     from: plan.table(table),
     selections: [{ kind: 'Star' }],
+    settings: settings && Object.keys(settings).length > 0 ? settings : undefined,
   }
   return { kind: 'InsertSelect', table: destination, select }
 }

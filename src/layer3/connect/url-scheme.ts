@@ -8,6 +8,15 @@
  * (`{pN:Type}`), exactly like a value in a WHERE clause — chDB accepts bound
  * parameters in table-function argument position, so a URL, password, or bucket
  * name is always data and never spliced into the SQL string.
+ *
+ * Ignored remote-only fields: a ClickHouse table function takes a fixed list of
+ * positional arguments, and some `@clickhouse/client`-style config fields have
+ * no slot in it — `region`, `sessionToken`, `headers`, `catalogConfig`. These
+ * describe how a remote service is reached, not how the local chDB engine runs
+ * the query, so connect() accepts them for parity and ignores them rather than
+ * failing (the same maximally-compatible stance Layer 2 takes for remote/auth
+ * fields). Put a region in the endpoint host, or use chTable/sql for the rest.
+ * `clickhouseSettings`, by contrast, is an engine setting and IS forwarded.
  */
 
 import { ChdbCompileError } from '../../errors'
@@ -31,7 +40,13 @@ export interface ConnectConfig {
   database?: string
   /** TLS toggle for a ClickHouse server source (cloud is always secure). */
   secure?: boolean
-  /** ClickHouse server settings, forwarded when the source is ClickHouse. */
+  /**
+   * ClickHouse engine settings (e.g. `max_threads`, `max_memory_usage`). These
+   * are applied to the local chDB engine as a `SETTINGS` clause on the queries
+   * this connection issues (describe / databases / tables / snapshot). For data
+   * queries you build with `selectFrom(conn.table())`, pass them through the
+   * builder's own `.settings()` / `execute({ settings })`.
+   */
   clickhouseSettings?: Record<string, string | number | boolean>
   /** Supabase service-role key (used as the password when set). */
   serviceRoleKey?: string
@@ -39,17 +54,22 @@ export interface ConnectConfig {
   anonKey?: string
   /** Default schema for Postgres / Supabase (a dotted table name overrides it). */
   schema?: string
-  /** Cloud region for object-storage sources (reserved; not yet positional). */
-  region?: string
   accessKeyId?: string
   secretAccessKey?: string
-  /** Session token for temporary object-storage credentials (reserved). */
-  sessionToken?: string
   /** Data format for object-storage / URL / file sources (sniffed if omitted). */
   format?: string
-  /** Extra HTTP headers for a URL source (reserved; not yet positional). */
+  // The fields below describe how a REMOTE service is reached. The ClickHouse
+  // table functions chDB drives have no argument slot for them, so connect()
+  // accepts them for @clickhouse/client parity but does not apply them — they do
+  // not change what the local engine executes. See "Ignored remote-only fields"
+  // in the module notes. Express them through the url/endpoint or chTable/sql.
+  /** Cloud region for object storage (put it in the endpoint host instead). */
+  region?: string
+  /** Session token for temporary object-storage credentials. */
+  sessionToken?: string
+  /** Extra HTTP headers for a URL source. */
   headers?: Record<string, string>
-  /** Catalog config for an Iceberg source (reserved; not yet positional). */
+  /** Catalog config for an Iceberg source. */
   catalogConfig?: Record<string, unknown>
 }
 
@@ -113,16 +133,6 @@ export interface SourcePlan {
   catalog(kind: 'databases' | 'tables'): CatalogQuery
 }
 
-// Config fields accepted for @clickhouse/client parity but not yet mapped to a
-// table-function argument. Setting one throws rather than silently dropping it.
-const UNWIRED_FIELDS: ReadonlyArray<keyof ConnectConfig> = [
-  'region',
-  'sessionToken',
-  'headers',
-  'catalogConfig',
-  'clickhouseSettings',
-]
-
 const bound = (value: unknown, chType = 'String'): Expr => ({ kind: 'Value', value, chType })
 const call = (name: string, args: Expr[]): Expr => ({ kind: 'Function', name, args })
 
@@ -153,14 +163,6 @@ export function buildSource(config: ConnectConfig): SourcePlan {
     throw new ChdbCompileError(`Unsupported connect url scheme ${JSON.stringify(url.protocol.replace(/:$/, ''))}`)
   }
   const spec: SchemeSpec = resolved
-
-  for (const field of UNWIRED_FIELDS) {
-    if (config[field] !== undefined) {
-      throw new ChdbCompileError(
-        `connect(): "${field}" is recognized for @clickhouse/client parity but is not yet mapped to a ${spec.sourceType} table-function argument; use chTable/sql to pass that option for now`,
-      )
-    }
-  }
 
   // A ClickHouse server reached with `secure: true` uses the TLS table function,
   // matching the always-secure `clickhouse-cloud://` scheme.

@@ -22,7 +22,7 @@ import { runtime } from '../runtime'
 import type { ExecContext } from '../execute/terminal'
 import { executeStatement } from '../execute/terminal'
 import { parseRows } from '../execute/format'
-import { compileExpr, compileQuery, type CompiledQuery } from '../compiler/compile'
+import { compileExpr, compileQuery, renderSettings, type CompiledQuery } from '../compiler/compile'
 import type { Expr, SelectQueryNode } from '../compiler/nodes'
 import { ChExpression } from '../builder/expression'
 import { buildSource, type CatalogQuery, type ConnectConfig, type SourcePlan } from './url-scheme'
@@ -35,17 +35,25 @@ export interface ColumnInfo {
   [key: string]: unknown
 }
 
+/** Engine settings applied to the queries a connection issues itself. */
+export type EngineSettings = Readonly<Record<string, string | number | boolean>>
+
+function hasSettings(settings?: EngineSettings): settings is EngineSettings {
+  return settings !== undefined && Object.keys(settings).length > 0
+}
+
 /** Build the `DESCRIBE TABLE <source>` statement for a table / location. */
-export function compileDescribe(plan: SourcePlan, table?: string): CompiledQuery {
+export function compileDescribe(plan: SourcePlan, table?: string, settings?: EngineSettings): CompiledQuery {
   const source = compileExpr(plan.table(table))
-  return { sql: `DESCRIBE TABLE ${source.sql}`, parameters: source.parameters }
+  const tail = hasSettings(settings) ? ` SETTINGS ${renderSettings(settings)}` : ''
+  return { sql: `DESCRIBE TABLE ${source.sql}${tail}`, parameters: source.parameters }
 }
 
 /**
  * Build a catalog SELECT that returns one column, always aliased `name`, so the
  * caller reads the same shape regardless of the source's native column naming.
  */
-function catalogSelect(cat: CatalogQuery, database?: string): SelectQueryNode {
+function catalogSelect(cat: CatalogQuery, database?: string, settings?: EngineSettings): SelectQueryNode {
   const where: Expr | undefined =
     database !== undefined && cat.databaseColumn !== undefined
       ? {
@@ -61,28 +69,34 @@ function catalogSelect(cat: CatalogQuery, database?: string): SelectQueryNode {
     selections: [{ kind: 'Alias', node: { kind: 'Reference', name: cat.nameColumn }, alias: 'name' }],
     where,
     orderBy: [{ expr: { kind: 'Reference', name: 'name' }, direction: 'asc' }],
+    settings: hasSettings(settings) ? settings : undefined,
   }
 }
 
 /** Build the database-listing query (ClickHouse / Postgres / MySQL sources). */
-export function compileDatabases(plan: SourcePlan): CompiledQuery {
-  return compileQuery(catalogSelect(plan.catalog('databases')))
+export function compileDatabases(plan: SourcePlan, settings?: EngineSettings): CompiledQuery {
+  return compileQuery(catalogSelect(plan.catalog('databases'), undefined, settings))
 }
 
 /** Build the table-listing query, optionally scoped to one database / schema. */
-export function compileTables(plan: SourcePlan, database?: string): CompiledQuery {
-  return compileQuery(catalogSelect(plan.catalog('tables'), database))
+export function compileTables(plan: SourcePlan, database?: string, settings?: EngineSettings): CompiledQuery {
+  return compileQuery(catalogSelect(plan.catalog('tables'), database, settings))
 }
 
 /** A logical connection to one external data source. */
 export class Connection {
   private readonly plan: SourcePlan
+  // ClickHouse engine settings applied to the queries this connection issues
+  // (describe / databases / tables / snapshot). Data queries built with
+  // selectFrom(conn.table()) carry settings through the builder's .settings().
+  private readonly settings?: EngineSettings
 
   constructor(
     private readonly ctx: ExecContext,
     config: ConnectConfig,
   ) {
     this.plan = buildSource(config)
+    this.settings = config.clickhouseSettings
   }
 
   /** The source family, e.g. `'postgres'`, `'s3'`, `'clickhouse'`. */
@@ -103,7 +117,7 @@ export class Connection {
 
   /** Column names and types of a table/location (`DESCRIBE TABLE`). */
   async describe(table?: string): Promise<ColumnInfo[]> {
-    return (await this.runRows(compileDescribe(this.plan, table))) as ColumnInfo[]
+    return (await this.runRows(compileDescribe(this.plan, table, this.settings))) as ColumnInfo[]
   }
 
   /**
@@ -113,13 +127,13 @@ export class Connection {
    * object storage, URL, file); use `describe()` there instead.
    */
   async databases(): Promise<string[]> {
-    const rows = await this.runRows(compileDatabases(this.plan))
+    const rows = await this.runRows(compileDatabases(this.plan, this.settings))
     return rows.map((r) => String(r.name))
   }
 
   /** List table names, optionally scoped to one database / schema. */
   async tables(database?: string): Promise<string[]> {
-    const rows = await this.runRows(compileTables(this.plan, database))
+    const rows = await this.runRows(compileTables(this.plan, database, this.settings))
     return rows.map((r) => String(r.name))
   }
 
@@ -128,7 +142,7 @@ export class Connection {
    * no ongoing sync — it reads the source a single time.
    */
   async snapshot(table: string, opts: { destination: string }): Promise<ChdbResult> {
-    return executeStatement(this.ctx, buildSnapshotNode(this.plan, table, opts.destination))
+    return executeStatement(this.ctx, buildSnapshotNode(this.plan, table, opts.destination, this.settings))
   }
 
   private async runRows(compiled: CompiledQuery): Promise<Record<string, unknown>[]> {
