@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { mkdtempSync, writeFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { selectFrom, connect, session } from '../../../index.js'
+import { selectFrom, connect, session, query, sql } from '../../../index.js'
 import { buildSource } from '../../../src/layer3/connect/url-scheme'
 import { buildSnapshotNode } from '../../../src/layer3/connect/snapshot'
 import { compileDatabases, compileTables, compileDescribe } from '../../../src/layer3/connect/connect'
@@ -189,21 +189,39 @@ describe('connect — snapshot (INSERT … SELECT)', () => {
   })
 })
 
-describe('connect — metadata discovery SQL', () => {
-  it('databases() reads system.databases over a ClickHouse source', () => {
-    const c = compileDatabases(buildSource({ url: 'clickhouse://u:p@h:9000' }))
-    expect(c.sql).toBe(
-      'SELECT `name` FROM remote({p0:String}, {p1:String}, {p2:String}, {p3:String}, {p4:String}) ORDER BY `name` ASC',
+describe('connect — metadata discovery SQL (catalog reads, output column aliased `name`)', () => {
+  it('ClickHouse reads system.databases / system.tables', () => {
+    expect(compileDatabases(buildSource({ url: 'clickhouse://u:p@h:9000' }))).toEqual({
+      sql: 'SELECT `name` AS `name` FROM remote({p0:String}, {p1:String}, {p2:String}, {p3:String}, {p4:String}) ORDER BY `name` ASC',
+      parameters: { p0: 'h:9000', p1: 'system', p2: 'databases', p3: 'u', p4: 'p' },
+    })
+    const tbl = compileTables(buildSource({ url: 'clickhouse://h:9000' }), 'prod')
+    expect(tbl.sql).toBe(
+      'SELECT `name` AS `name` FROM remote({p0:String}, {p1:String}, {p2:String}) WHERE `database` = {p3:String} ORDER BY `name` ASC',
     )
-    expect(c.parameters).toEqual({ p0: 'h:9000', p1: 'system', p2: 'databases', p3: 'u', p4: 'p' })
+    expect(tbl.parameters).toEqual({ p0: 'h:9000', p1: 'system', p2: 'tables', p3: 'prod' })
   })
 
-  it('tables(db) filters system.tables by a bound database name', () => {
-    const c = compileTables(buildSource({ url: 'clickhouse://h:9000' }), 'prod')
-    expect(c.sql).toBe(
-      'SELECT `name` FROM remote({p0:String}, {p1:String}, {p2:String}) WHERE `database` = {p3:String} ORDER BY `name` ASC',
+  it('Postgres reads information_schema.schemata / .tables (schemas are its databases)', () => {
+    expect(compileDatabases(buildSource({ url: 'postgres://u:p@h:5432/app' })).sql).toBe(
+      'SELECT `schema_name` AS `name` FROM postgresql({p0:String}, {p1:String}, {p2:String}, {p3:String}, {p4:String}, {p5:String}) ORDER BY `name` ASC',
     )
-    expect(c.parameters).toEqual({ p0: 'h:9000', p1: 'system', p2: 'tables', p3: 'prod' })
+    const tbl = compileTables(buildSource({ url: 'postgres://u:p@h:5432/app' }), 'public')
+    expect(tbl.sql).toBe(
+      'SELECT `table_name` AS `name` FROM postgresql({p0:String}, {p1:String}, {p2:String}, {p3:String}, {p4:String}, {p5:String}) WHERE `table_schema` = {p6:String} ORDER BY `name` ASC',
+    )
+    expect(tbl.parameters).toEqual({ p0: 'h:5432', p1: 'app', p2: 'tables', p3: 'u', p4: 'p', p5: 'information_schema', p6: 'public' })
+  })
+
+  it('MySQL reads information_schema.SCHEMATA / .TABLES (upper-case relations/columns)', () => {
+    expect(compileDatabases(buildSource({ url: 'mysql://u:p@h:3306/shop' })).sql).toBe(
+      'SELECT `SCHEMA_NAME` AS `name` FROM mysql({p0:String}, {p1:String}, {p2:String}, {p3:String}, {p4:String}) ORDER BY `name` ASC',
+    )
+    const tbl = compileTables(buildSource({ url: 'mysql://u:p@h:3306/shop' }), 'shop')
+    expect(tbl.sql).toBe(
+      'SELECT `TABLE_NAME` AS `name` FROM mysql({p0:String}, {p1:String}, {p2:String}, {p3:String}, {p4:String}) WHERE `TABLE_SCHEMA` = {p5:String} ORDER BY `name` ASC',
+    )
+    expect(tbl.parameters).toEqual({ p0: 'h:3306', p1: 'information_schema', p2: 'TABLES', p3: 'u', p4: 'p', p5: 'shop' })
   })
 
   it('describe() compiles DESCRIBE TABLE over any source', () => {
@@ -214,8 +232,19 @@ describe('connect — metadata discovery SQL', () => {
     })
   })
 
-  it('databases()/tables() reject non-ClickHouse sources', () => {
-    expect(() => compileDatabases(buildSource({ url: 'postgres://u:p@h/app' }))).toThrow(/only available for ClickHouse/)
+  it('databases()/tables() reject sources without a SQL catalog', () => {
+    expect(() => compileDatabases(buildSource({ url: 'mongodb://u:p@h/app' }))).toThrow(/not available for a mongodb source/)
+    expect(() => compileTables(buildSource({ url: 's3://b/x' }))).toThrow(/not available for a s3 source/)
+  })
+})
+
+describe('connect — config fields with no table-function slot are rejected, not dropped', () => {
+  it('throws when a recognized-but-unwired field is set', () => {
+    expect(() => buildSource({ url: 's3://b/x', region: 'us-east-1' })).toThrow(/"region" is recognized/)
+    expect(() => buildSource({ url: 'https://e.com/d', headers: { a: 'b' } })).toThrow(/"headers" is recognized/)
+    expect(() => buildSource({ url: 'clickhouse://h:9000/db', clickhouseSettings: { max_threads: 4 } })).toThrow(
+      /"clickhouseSettings" is recognized/,
+    )
   })
 })
 
@@ -274,5 +303,103 @@ describe('connect — execution against real local files', () => {
     } finally {
       db.close()
     }
+  })
+})
+
+// Real federation against live Postgres / MySQL servers. These prove the table
+// functions, metadata catalogs, snapshots, and cross-source joins work against
+// actual databases — not just that the SQL looks right. They skip cleanly when
+// no server is reachable (e.g. a CI job without the services), and the URLs are
+// overridable so CI can point at its own instances.
+const PG_URL = process.env.CHDB_TEST_PG_URL ?? 'postgres://postgres:pw@127.0.0.1:55432/app'
+const MY_URL = process.env.CHDB_TEST_MYSQL_URL ?? 'mysql://app:pw@127.0.0.1:33060/shop'
+
+function reachable(probe: string): boolean {
+  try {
+    query(probe, 'CSV')
+    return true
+  } catch {
+    return false
+  }
+}
+
+const PG_OK = reachable(`SELECT 1 FROM ${tfn(PG_URL, 'users')} LIMIT 1`)
+const MY_OK = reachable(`SELECT 1 FROM ${tfn(MY_URL, 'orders')} LIMIT 1`)
+
+// Build the raw probe table-function call from a connection url (so the probe
+// and the public connect() path read the same servers).
+function tfn(url: string, name: string): string {
+  const c = compileExpr(buildSource({ url }).table(name))
+  let sql = c.sql
+  // Inline the bound probe params (probe only — the library never does this).
+  for (const [k, v] of Object.entries(c.parameters)) {
+    sql = sql.replace(`{${k}:String}`, `'${String(v).replace(/'/g, "''")}'`)
+  }
+  return sql
+}
+
+describe.skipIf(!PG_OK)('connect — live Postgres federation', () => {
+  it('reads rows through a postgres:// connection', async () => {
+    const pg = connect({ url: PG_URL })
+    const rows = (await selectFrom(pg.table('users').as('u'))
+      .select('country')
+      .where('country', '=', 'US')
+      .orderBy('country')
+      .execute()) as { country: string }[]
+    expect(rows).toEqual([{ country: 'US' }, { country: 'US' }])
+  })
+
+  it('databases() lists schemas and tables(schema) lists tables', async () => {
+    const pg = connect({ url: PG_URL })
+    expect(await pg.databases()).toContain('public')
+    expect(await pg.tables('public')).toContain('users')
+  })
+
+  it('describe() returns the inferred columns', async () => {
+    const cols = await connect({ url: PG_URL }).describe('users')
+    expect(cols.map((c) => c.name)).toEqual(['id', 'country'])
+  })
+
+  it('snapshot() materializes a remote table into a local one', async () => {
+    const db = session()
+    try {
+      await db.session!.queryAsync('CREATE TABLE snap (id Int64, country String) ENGINE = Memory')
+      await db.connect({ url: PG_URL }).snapshot('users', { destination: 'snap' })
+      const n = (await db.selectFrom('snap').select('country').where('country', '=', 'US').execute()) as unknown[]
+      expect(n).toHaveLength(2)
+    } finally {
+      db.close()
+    }
+  })
+})
+
+describe.skipIf(!MY_OK)('connect — live MySQL federation', () => {
+  it('reads rows and lists the catalog', async () => {
+    const my = connect({ url: MY_URL })
+    const rows = (await selectFrom(my.table('orders').as('o'))
+      .select('country')
+      .where('country', '=', 'US')
+      .orderBy('country')
+      .execute()) as { country: string }[]
+    expect(rows).toEqual([{ country: 'US' }, { country: 'US' }])
+    expect(await my.databases()).toContain('shop')
+    expect(await my.tables('shop')).toContain('orders')
+  })
+})
+
+describe.skipIf(!(PG_OK && MY_OK))('connect — cross-source JOIN (Postgres × MySQL)', () => {
+  it('joins a Postgres table to a MySQL table through the local engine', async () => {
+    const pg = connect({ url: PG_URL })
+    const my = connect({ url: MY_URL })
+    const rows = (await selectFrom(pg.table('users').as('u'))
+      .innerJoin(my.table('orders').as('o'), 'u.id', 'o.id')
+      .select(['u.id', sql.raw('`u`.`country`').as('pg_country'), sql.raw('`o`.`country`').as('my_country')])
+      .orderBy('u.id')
+      .execute()) as { id: string; pg_country: string; my_country: string }[]
+    expect(rows).toEqual([
+      { id: '1', pg_country: 'US', my_country: 'US' },
+      { id: '2', pg_country: 'FR', my_country: 'FR' },
+      { id: '3', pg_country: 'US', my_country: 'US' },
+    ])
   })
 })

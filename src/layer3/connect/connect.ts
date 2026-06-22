@@ -18,14 +18,14 @@
  */
 
 import type { ChdbResult } from '../../result'
-import { ChdbCompileError } from '../../errors'
 import { runtime } from '../runtime'
 import type { ExecContext } from '../execute/terminal'
 import { executeStatement } from '../execute/terminal'
 import { parseRows } from '../execute/format'
 import { compileExpr, compileQuery, type CompiledQuery } from '../compiler/compile'
+import type { Expr, SelectQueryNode } from '../compiler/nodes'
 import { ChExpression } from '../builder/expression'
-import { buildSource, type ConnectConfig, type SourcePlan } from './url-scheme'
+import { buildSource, type CatalogQuery, type ConnectConfig, type SourcePlan } from './url-scheme'
 import { buildSnapshotNode } from './snapshot'
 
 /** A column of `DESCRIBE TABLE`. */
@@ -41,43 +41,37 @@ export function compileDescribe(plan: SourcePlan, table?: string): CompiledQuery
   return { sql: `DESCRIBE TABLE ${source.sql}`, parameters: source.parameters }
 }
 
-/** Build the database-listing query (ClickHouse server sources only). */
-export function compileDatabases(plan: SourcePlan): CompiledQuery {
-  requireClickHouse(plan, 'databases()')
-  return compileQuery({
+/**
+ * Build a catalog SELECT that returns one column, always aliased `name`, so the
+ * caller reads the same shape regardless of the source's native column naming.
+ */
+function catalogSelect(cat: CatalogQuery, database?: string): SelectQueryNode {
+  const where: Expr | undefined =
+    database !== undefined && cat.databaseColumn !== undefined
+      ? {
+          kind: 'Binary',
+          left: { kind: 'Reference', name: cat.databaseColumn },
+          op: '=',
+          right: { kind: 'Value', value: database, chType: 'String' },
+        }
+      : undefined
+  return {
     kind: 'SelectQuery',
-    from: plan.serverTable('system', 'databases'),
-    selections: [{ kind: 'Reference', name: 'name' }],
+    from: cat.source,
+    selections: [{ kind: 'Alias', node: { kind: 'Reference', name: cat.nameColumn }, alias: 'name' }],
+    where,
     orderBy: [{ expr: { kind: 'Reference', name: 'name' }, direction: 'asc' }],
-  })
-}
-
-/** Build the table-listing query, optionally scoped to one database. */
-export function compileTables(plan: SourcePlan, database?: string): CompiledQuery {
-  requireClickHouse(plan, 'tables()')
-  return compileQuery({
-    kind: 'SelectQuery',
-    from: plan.serverTable('system', 'tables'),
-    selections: [{ kind: 'Reference', name: 'name' }],
-    where:
-      database !== undefined
-        ? {
-            kind: 'Binary',
-            left: { kind: 'Reference', name: 'database' },
-            op: '=',
-            right: { kind: 'Value', value: database, chType: 'String' },
-          }
-        : undefined,
-    orderBy: [{ expr: { kind: 'Reference', name: 'name' }, direction: 'asc' }],
-  })
-}
-
-function requireClickHouse(plan: SourcePlan, method: string): void {
-  if (plan.sourceType !== 'clickhouse') {
-    throw new ChdbCompileError(
-      `${method} metadata discovery is only available for ClickHouse sources; use describe() for a ${plan.sourceType} source`,
-    )
   }
+}
+
+/** Build the database-listing query (ClickHouse / Postgres / MySQL sources). */
+export function compileDatabases(plan: SourcePlan): CompiledQuery {
+  return compileQuery(catalogSelect(plan.catalog('databases')))
+}
+
+/** Build the table-listing query, optionally scoped to one database / schema. */
+export function compileTables(plan: SourcePlan, database?: string): CompiledQuery {
+  return compileQuery(catalogSelect(plan.catalog('tables'), database))
 }
 
 /** A logical connection to one external data source. */
@@ -112,13 +106,18 @@ export class Connection {
     return (await this.runRows(compileDescribe(this.plan, table))) as ColumnInfo[]
   }
 
-  /** List database names (ClickHouse server sources only). */
+  /**
+   * List the source's databases (ClickHouse / Postgres / MySQL). Postgres
+   * groups tables by schema, so this returns its schema names — the same values
+   * `tables()` filters on. Throws for sources without a SQL catalog (MongoDB,
+   * object storage, URL, file); use `describe()` there instead.
+   */
   async databases(): Promise<string[]> {
     const rows = await this.runRows(compileDatabases(this.plan))
     return rows.map((r) => String(r.name))
   }
 
-  /** List table names, optionally scoped to one database (ClickHouse only). */
+  /** List table names, optionally scoped to one database / schema. */
   async tables(database?: string): Promise<string[]> {
     const rows = await this.runRows(compileTables(this.plan, database))
     return rows.map((r) => String(r.name))

@@ -83,6 +83,16 @@ const SCHEMES: Readonly<Record<string, SchemeSpec>> = {
   'file:': { sourceType: 'file', fn: 'file', kind: 'location' },
 }
 
+/** How to list a source's databases/tables: which catalog to read and which columns hold the names. */
+export interface CatalogQuery {
+  /** Table-function read of the source's catalog. */
+  readonly source: Expr
+  /** Column holding the database/table name. */
+  readonly nameColumn: string
+  /** Column to filter `tables()` by database (present only on the tables catalog). */
+  readonly databaseColumn?: string
+}
+
 /** A resolved source: enough to build a table-function read for any table/location. */
 export interface SourcePlan {
   readonly scheme: string
@@ -96,12 +106,22 @@ export interface SourcePlan {
    */
   table(name?: string): Expr
   /**
-   * Table-function expression aimed at an explicit catalog table on a
-   * ClickHouse server source — used by metadata discovery. Throws for any other
-   * source family.
+   * The catalog read for listing databases or tables. Supported for ClickHouse,
+   * Postgres, and MySQL (via their system / information_schema tables); throws
+   * for sources without a SQL catalog (MongoDB, object storage, URL, file).
    */
-  serverTable(database: string, table: string): Expr
+  catalog(kind: 'databases' | 'tables'): CatalogQuery
 }
+
+// Config fields accepted for @clickhouse/client parity but not yet mapped to a
+// table-function argument. Setting one throws rather than silently dropping it.
+const UNWIRED_FIELDS: ReadonlyArray<keyof ConnectConfig> = [
+  'region',
+  'sessionToken',
+  'headers',
+  'catalogConfig',
+  'clickhouseSettings',
+]
 
 const bound = (value: unknown, chType = 'String'): Expr => ({ kind: 'Value', value, chType })
 const call = (name: string, args: Expr[]): Expr => ({ kind: 'Function', name, args })
@@ -133,6 +153,14 @@ export function buildSource(config: ConnectConfig): SourcePlan {
     throw new ChdbCompileError(`Unsupported connect url scheme ${JSON.stringify(url.protocol.replace(/:$/, ''))}`)
   }
   const spec: SchemeSpec = resolved
+
+  for (const field of UNWIRED_FIELDS) {
+    if (config[field] !== undefined) {
+      throw new ChdbCompileError(
+        `connect(): "${field}" is recognized for @clickhouse/client parity but is not yet mapped to a ${spec.sourceType} table-function argument; use chTable/sql to pass that option for now`,
+      )
+    }
+  }
 
   // A ClickHouse server reached with `secure: true` uses the TLS table function,
   // matching the always-secure `clickhouse-cloud://` scheme.
@@ -186,11 +214,44 @@ export function buildSource(config: ConnectConfig): SourcePlan {
     return args
   }
 
-  function serverTable(database_: string, table: string): Expr {
-    if (spec.sourceType === 'clickhouse') {
-      return call(fn, remoteArgs(database_, table))
+  // Catalog reads for metadata discovery. Each source exposes its catalog
+  // differently: ClickHouse through `system`, Postgres through a database's
+  // `information_schema` schema, MySQL through the `information_schema` database.
+  // Postgres groups tables by schema, so its "databases" are schemas — the names
+  // returned by databases() are exactly the values tables() accepts.
+  function catalog(kind: 'databases' | 'tables'): CatalogQuery {
+    switch (spec.sourceType) {
+      case 'clickhouse': {
+        const source = call(fn, remoteArgs('system', kind === 'databases' ? 'databases' : 'tables'))
+        return kind === 'databases'
+          ? { source, nameColumn: 'name' }
+          : { source, nameColumn: 'name', databaseColumn: 'database' }
+      }
+      case 'postgres': {
+        if (database === undefined) {
+          throw new ChdbCompileError('A Postgres source needs a database for metadata discovery: pass connect({ database }) or set it in the url')
+        }
+        const [user, pass] = requireAuth()
+        const relation = kind === 'databases' ? 'schemata' : 'tables'
+        const source = call('postgresql', [bound(addr), bound(database), bound(relation), user, pass, bound('information_schema')])
+        return kind === 'databases'
+          ? { source, nameColumn: 'schema_name' }
+          : { source, nameColumn: 'table_name', databaseColumn: 'table_schema' }
+      }
+      case 'mysql': {
+        const [user, pass] = requireAuth()
+        // MySQL information_schema relation and column names are upper-case.
+        const relation = kind === 'databases' ? 'SCHEMATA' : 'TABLES'
+        const source = call('mysql', [bound(addr), bound('information_schema'), bound(relation), user, pass])
+        return kind === 'databases'
+          ? { source, nameColumn: 'SCHEMA_NAME' }
+          : { source, nameColumn: 'TABLE_NAME', databaseColumn: 'TABLE_SCHEMA' }
+      }
+      default:
+        throw new ChdbCompileError(
+          `Listing databases/tables is not available for a ${spec.sourceType} source; use describe() to inspect a known table`,
+        )
     }
-    throw new ChdbCompileError(`Catalog reads over a ${spec.sourceType} source are not supported`)
   }
 
   function table(name?: string): Expr {
@@ -247,6 +308,6 @@ export function buildSource(config: ConnectConfig): SourcePlan {
     kind: spec.kind,
     fn,
     table,
-    serverTable,
+    catalog,
   }
 }
