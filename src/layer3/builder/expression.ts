@@ -100,3 +100,23 @@ export function toValue(input: unknown): Expr {
   if (input instanceof ChExpression) return input.node
   return { kind: 'Value', value: input }
 }
+
+/** A where/having argument list: `(lhs, op, rhs)` or a single expression. */
+export type PredicateArgs = [ExprInput] | [ExprInput, string, unknown]
+
+/** Turn a predicate argument list into one expression node. */
+export function buildPredicate(args: PredicateArgs): Expr {
+  if (args.length === 1) return toExpr(args[0])
+  return { kind: 'Binary', left: toExpr(args[0]), op: args[1], right: toValue(args[2]) }
+}
+
+/** Combine an existing predicate with a new one under AND / OR, flattening. */
+export function combinePredicate(
+  existing: Expr | undefined,
+  next: Expr,
+  kind: 'And' | 'Or',
+): Expr {
+  if (existing === undefined) return next
+  if (existing.kind === kind) return { kind, items: [...existing.items, next] }
+  return { kind, items: [existing, next] }
+}

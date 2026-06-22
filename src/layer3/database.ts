@@ -14,6 +14,9 @@ import { runtime, type RuntimeSession } from './runtime'
 import type { Expr, SelectQueryNode } from './compiler/nodes'
 import { toExpr, type ExprInput } from './builder/expression'
 import { SelectQueryBuilder } from './builder/select'
+import { InsertQueryBuilder } from './builder/insert'
+import { UpdateQueryBuilder } from './builder/update'
+import { DeleteQueryBuilder } from './builder/delete'
 import type { ExecContext } from './execute/terminal'
 
 /** Anything accepted as a SELECT source: a table name, an expression, or a subquery builder. */
@@ -36,6 +39,21 @@ export class Database<DB = Record<string, any>> {
     return new SelectQueryBuilder<O>(this.ctx, node)
   }
 
+  /** Start an INSERT into a table (row arrays or `INSERT … SELECT`). */
+  insertInto(table: string): InsertQueryBuilder {
+    return new InsertQueryBuilder(this.ctx, table)
+  }
+
+  /** Start an UPDATE (compiles to a ClickHouse `ALTER TABLE … UPDATE` mutation). */
+  updateTable(table: string): UpdateQueryBuilder {
+    return new UpdateQueryBuilder(this.ctx, { kind: 'UpdateQuery', table, assignments: [] })
+  }
+
+  /** Start a DELETE (compiles to a ClickHouse `ALTER TABLE … DELETE` mutation). */
+  deleteFrom(table: string): DeleteQueryBuilder {
+    return new DeleteQueryBuilder(this.ctx, { kind: 'DeleteQuery', table })
+  }
+
   /** The bound Session, if this root was created with one. */
   get session(): RuntimeSession | undefined {
     return this.ctx.session
@@ -52,6 +70,21 @@ const DEFAULT = new Database({})
 /** Start a SELECT on the default connection (the README hero shortcut). */
 export function selectFrom<O = Record<string, unknown>>(source: FromInput): SelectQueryBuilder<O> {
   return DEFAULT.selectFrom<O>(source)
+}
+
+/** Start an INSERT on the default connection. */
+export function insertInto(table: string): InsertQueryBuilder {
+  return DEFAULT.insertInto(table)
+}
+
+/** Start an UPDATE (ClickHouse mutation) on the default connection. */
+export function updateTable(table: string): UpdateQueryBuilder {
+  return DEFAULT.updateTable(table)
+}
+
+/** Start a DELETE (ClickHouse mutation) on the default connection. */
+export function deleteFrom(table: string): DeleteQueryBuilder {
+  return DEFAULT.deleteFrom(table)
 }
 
 /** Create a typed builder root. Pass `{ session }` to pin the connection. */

@@ -13,11 +13,27 @@
 export { ChdbCompileError } from '../errors'
 
 // Root factory.
-export { selectFrom, database, session, Database } from './database'
+export {
+  selectFrom,
+  insertInto,
+  updateTable,
+  deleteFrom,
+  database,
+  session,
+  Database,
+} from './database'
 export type { FromInput } from './database'
 
 // Builder + expression helpers.
 export { SelectQueryBuilder } from './builder/select'
+export {
+  InsertQueryBuilder,
+  InsertValuesExecutable,
+  InsertSelectExecutable,
+} from './builder/insert'
+export type { InsertRow, InsertColumns } from './builder/insert'
+export { UpdateQueryBuilder } from './builder/update'
+export { DeleteQueryBuilder } from './builder/delete'
 export { sql, eb, ref, val, fn, ChExpression } from './builder/expression'
 export type { ExprInput } from './builder/expression'
 
