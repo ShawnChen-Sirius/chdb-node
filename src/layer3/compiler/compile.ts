@@ -249,6 +249,13 @@ export function compileQuery(node: QueryNode): CompiledQuery {
   return { sql, parameters: c.params.parameters }
 }
 
+/** Compile a single expression to `{ sql, parameters }` (e.g. a table-function read). */
+export function compileExpr(node: Expr): CompiledQuery {
+  const c = new Compiler()
+  const sql = c.expr(node)
+  return { sql, parameters: c.params.parameters }
+}
+
 function formatNumber(n: number): string {
   if (!Number.isFinite(n)) throw new ChdbCompileError(`Expected a finite number, got ${n}`)
   return String(n)
