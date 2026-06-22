@@ -83,3 +83,5 @@ export type {
 } from './codegen/introspect'
 export { emitDatabase } from './codegen/emit'
 export type { EmitOptions } from './codegen/emit'
+export { parsePrismaSchema } from './codegen/from-prisma'
+export { parseDrizzleFile, parseDrizzleSource } from './codegen/from-drizzle'

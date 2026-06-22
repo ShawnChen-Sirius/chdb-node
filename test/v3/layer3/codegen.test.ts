@@ -74,16 +74,21 @@ describe('CLI argv parsing and source planning', () => {
 
   it('builds the right source plan for each mode', () => {
     expect(planSources(parseArgs(['--from-file', '/x.csv', '--format', 'CSV']))).toEqual({
-      file: { kind: 'file', path: '/x.csv', format: 'CSV', structure: undefined },
+      mode: 'introspect',
+      sources: { file: { kind: 'file', path: '/x.csv', format: 'CSV', structure: undefined } },
     })
     expect(planSources(parseArgs(['--from-table', 'events']))).toEqual({
-      events: { kind: 'table', name: 'events' },
+      mode: 'introspect',
+      sources: { events: { kind: 'table', name: 'events' } },
     })
     expect(
       planSources(parseArgs(['--from-url', 'postgres://h/d', '--table', 'users', '--table', 'orders'])),
     ).toEqual({
-      users: { kind: 'url', config: { url: 'postgres://h/d', username: undefined, password: undefined, database: undefined }, table: 'users' },
-      orders: { kind: 'url', config: { url: 'postgres://h/d', username: undefined, password: undefined, database: undefined }, table: 'orders' },
+      mode: 'introspect',
+      sources: {
+        users: { kind: 'url', config: { url: 'postgres://h/d', username: undefined, password: undefined, database: undefined }, table: 'users' },
+        orders: { kind: 'url', config: { url: 'postgres://h/d', username: undefined, password: undefined, database: undefined }, table: 'orders' },
+      },
     })
   })
 })

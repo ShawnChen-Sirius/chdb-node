@@ -22,14 +22,18 @@
  *                               (default: the table name or "file" / "stdin")
  */
 
-import { writeFileSync } from 'fs'
-import { introspectDatabase, type IntrospectSource } from './introspect'
+import { readFileSync, writeFileSync } from 'fs'
+import { introspectDatabase, type IntrospectedDatabase, type IntrospectSource } from './introspect'
 import { emitDatabase } from './emit'
+import { parsePrismaSchema } from './from-prisma'
+import { parseDrizzleFile } from './from-drizzle'
 
 interface ParsedArgs {
   fromFile?: string
   fromTable?: string
   fromUrl?: string
+  /** Static conversion: `drizzle:<path>` or `prisma:<path>`. */
+  from?: string
   tables: string[]
   format?: string
   structure?: string
@@ -49,6 +53,8 @@ One source mode is required:
   --from-file <path>            DESCRIBE a local file (file() table function)
   --from-table <name>           DESCRIBE a local table on the default connection
   --from-url <url>              Open the url via connect() and DESCRIBE
+  --from drizzle:<path>         Parse a Drizzle schema (.ts) statically
+  --from prisma:<path>          Parse a Prisma schema (.prisma) statically
 
 Options:
   --table <name>                Server sources need at least one (repeatable).
@@ -78,6 +84,7 @@ export function parseArgs(argv: ReadonlyArray<string>): ParsedArgs {
       case '--from-file': out.fromFile = value; break
       case '--from-table': out.fromTable = value; break
       case '--from-url': out.fromUrl = value; break
+      case '--from': out.from = value; break
       case '--table': out.tables.push(value); break
       case '--format': out.format = value; break
       case '--structure': out.structure = value; break
@@ -93,19 +100,24 @@ export function parseArgs(argv: ReadonlyArray<string>): ParsedArgs {
   return out
 }
 
-/** Turn parsed args into the `{ label → source }` map `introspectDatabase` takes. */
-export function planSources(args: ParsedArgs): Record<string, IntrospectSource> {
-  const modes = [args.fromFile, args.fromTable, args.fromUrl].filter((v) => v !== undefined).length
-  if (modes === 0) throw new Error('Pick one source mode: --from-file, --from-table, or --from-url')
-  if (modes > 1) throw new Error('Pick exactly one source mode (--from-file / --from-table / --from-url)')
+/** The runtime plan — either introspect-by-engine or convert-from-schema-file. */
+export type SourcePlan =
+  | { mode: 'introspect'; sources: Record<string, IntrospectSource> }
+  | { mode: 'static'; db: IntrospectedDatabase }
+
+/** Turn parsed args into a runtime plan: an introspect map or a static-conversion DB. */
+export function planSources(args: ParsedArgs): SourcePlan {
+  const modes = [args.fromFile, args.fromTable, args.fromUrl, args.from].filter((v) => v !== undefined).length
+  if (modes === 0) throw new Error('Pick one source mode: --from-file, --from-table, --from-url, or --from drizzle:<path> / prisma:<path>')
+  if (modes > 1) throw new Error('Pick exactly one source mode (--from-file / --from-table / --from-url / --from)')
 
   if (args.fromFile !== undefined) {
     const label = args.label ?? 'file'
-    return { [label]: { kind: 'file', path: args.fromFile, format: args.format, structure: args.structure } }
+    return { mode: 'introspect', sources: { [label]: { kind: 'file', path: args.fromFile, format: args.format, structure: args.structure } } }
   }
   if (args.fromTable !== undefined) {
     const label = args.label ?? args.fromTable
-    return { [label]: { kind: 'table', name: args.fromTable } }
+    return { mode: 'introspect', sources: { [label]: { kind: 'table', name: args.fromTable } } }
   }
   if (args.fromUrl !== undefined) {
     if (args.tables.length === 0) {
@@ -119,7 +131,16 @@ export function planSources(args: ParsedArgs): Record<string, IntrospectSource> 
     }
     const sources: Record<string, IntrospectSource> = {}
     for (const t of args.tables) sources[t] = { kind: 'url', config, table: t }
-    return sources
+    return { mode: 'introspect', sources }
+  }
+  if (args.from !== undefined) {
+    const colon = args.from.indexOf(':')
+    if (colon === -1) throw new Error("--from expects 'drizzle:<path>' or 'prisma:<path>'")
+    const kind = args.from.slice(0, colon)
+    const path = args.from.slice(colon + 1)
+    if (kind === 'prisma') return { mode: 'static', db: parsePrismaSchema(readFileSync(path, 'utf-8')) }
+    if (kind === 'drizzle') return { mode: 'static', db: parseDrizzleFile(path) }
+    throw new Error(`Unsupported --from kind '${kind}' (expected 'drizzle' or 'prisma')`)
   }
   /* istanbul ignore next */
   throw new Error('unreachable')
@@ -147,7 +168,7 @@ export async function main(argv: ReadonlyArray<string>, writers: { stdout: (s: s
     writers.stdout(`${pkg.version}\n`)
     return { code: 0 }
   }
-  let plan: Record<string, IntrospectSource>
+  let plan: SourcePlan
   try {
     plan = planSources(args)
   } catch (e) {
@@ -155,9 +176,9 @@ export async function main(argv: ReadonlyArray<string>, writers: { stdout: (s: s
     return { code: 2 }
   }
 
-  let db
+  let db: IntrospectedDatabase
   try {
-    db = await introspectDatabase(plan)
+    db = plan.mode === 'introspect' ? await introspectDatabase(plan.sources) : plan.db
   } catch (e) {
     writers.stderr(`gen-types: ${(e as Error).message}\n`)
     return { code: 1 }
@@ -181,6 +202,7 @@ function describeBanner(args: ParsedArgs): string {
     // Don't leak credentials in the banner — show scheme://host only.
     return `source: ${u.protocol}//${u.host}${u.pathname}  tables: ${args.tables.join(', ')}`
   }
+  if (args.from !== undefined) return `source: ${args.from}`
   return ''
 }
 
