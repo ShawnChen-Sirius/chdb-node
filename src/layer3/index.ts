@@ -37,6 +37,18 @@ export { DeleteQueryBuilder } from './builder/delete'
 export { sql, eb, ref, val, fn, ChExpression } from './builder/expression'
 export type { ExprInput } from './builder/expression'
 
+// ClickHouse table-function and function helpers.
+export { chTable } from './builder/table-functions'
+export type {
+  S3Options,
+  FileOptions,
+  UrlOptions,
+  PgOptions,
+  MySqlOptions,
+  LakeOptions,
+} from './builder/table-functions'
+export { chFn } from './builder/functions'
+
 // Compiler output (for `.compile()` consumers and tooling).
 export { compileQuery } from './compiler/compile'
 export type { CompiledQuery } from './compiler/compile'
