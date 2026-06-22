@@ -64,3 +64,7 @@ export type { ExecuteOptions, ExecContext } from './execute/terminal'
 
 // AST node types.
 export type * from './compiler/nodes'
+
+// Type-system: CH type-string-literal → TS type, row inference.
+export type { CHTypeOf } from './types/ch-types'
+export type { AnyDatabase, ColumnSchema, ColumnType, DatabaseSchema, InferRow, RowOf } from './types/infer'
